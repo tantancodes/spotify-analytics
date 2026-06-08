@@ -38,7 +38,7 @@ def spotify_login():
     spotify_auth_url = f"https://accounts.spotify.com/authorize?{urllib.parse.urlencode(state_params)}"
     return RedirectResponse(spotify_auth_url)
 
-@app.get("/callback")
+@app.get("/api/callback")  # <-- Make sure it says /api/callback here!
 def spotify_callback(code: str = None, error: str = None):
     """Receives Spotify's secure passport code and exchanges it for real access tokens."""
     if error:
