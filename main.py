@@ -112,7 +112,7 @@ def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found. Log in first.")
 
     response = requests.get(
-        "https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=medium_term",
+        "https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term",
         headers={"Authorization": f"Bearer {user.access_token}"},
     )
 
@@ -149,7 +149,6 @@ def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
                 db.add(TrackModel(track_id=track_id, title=title, artist_id=artist_id))
             seen_track_ids.add(track_id)
 
-        # Queue history entries separately so they're only inserted AFTER tracks are flushed
         history_entries.append(ListeningHistoryModel(
             spotify_id=spotify_id,
             track_id=track_id,
@@ -157,10 +156,8 @@ def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
         ))
         saved_count += 1
 
-    # Flush artists and tracks to the database FIRST, so foreign keys resolve correctly
     db.flush()
 
-    # Now it's safe to add listening history rows
     for entry in history_entries:
         db.add(entry)
 
