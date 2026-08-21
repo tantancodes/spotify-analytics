@@ -9,6 +9,7 @@ class UserModel(Base):
     display_name = Column(String, nullable=True)
     access_token = Column(String, nullable=True)
     refresh_token = Column(String, nullable=True)
+    session_token = Column(String, unique=True, nullable=True, index=True)
 
 
 class ArtistModel(Base):

@@ -1,10 +1,12 @@
 import os
+import secrets
 import urllib.parse
 import requests
 import models
 from models import UserModel, TrackModel, ArtistModel, ListeningHistoryModel
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import engine, Base, get_db
@@ -13,6 +15,35 @@ from recommendations import sync_artist_genres, recommend_tracks
 
 app = FastAPI(title="Spotify Listening Intelligence Engine API")
 Base.metadata.create_all(bind=engine)
+
+# Base.metadata.create_all() only creates missing TABLES, not missing
+# COLUMNS on tables that already exist -- so adding session_token to
+# UserModel above wouldn't reach an already-running database without
+# this. A real migration tool (Alembic) would replace this if the
+# schema keeps growing.
+with engine.connect() as _conn:
+    _conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token VARCHAR"))
+    _conn.commit()
+
+
+def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)) -> UserModel:
+    """
+    Resolves the authenticated user from a session token, instead of
+    trusting a client-supplied spotify_id. Every route that touches a
+    specific user's data depends on this rather than taking spotify_id
+    as a parameter -- that's what stops one user from ever being able
+    to request another user's data by simply changing an ID in the URL.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing Authorization header. Expected: 'Bearer <session_token>' (returned by /api/callback after login).",
+        )
+    token = authorization.removeprefix("Bearer ").strip()
+    user = db.query(UserModel).filter(UserModel.session_token == token).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token. Log in again via /api/login.")
+    return user
 
 
 @app.get("/api/health")
@@ -82,35 +113,37 @@ def spotify_callback(code: str = None, error: str = None):
     spotify_id = profile.get("id")
     display_name = profile.get("display_name")
 
+    session_token = secrets.token_urlsafe(32)
+
     db = next(get_db())
     existing_user = db.query(UserModel).filter(UserModel.spotify_id == spotify_id).first()
     if existing_user:
         existing_user.access_token = access_token
         existing_user.refresh_token = refresh_token
+        existing_user.session_token = session_token
     else:
         new_user = UserModel(
             spotify_id=spotify_id,
             display_name=display_name,
             access_token=access_token,
             refresh_token=refresh_token,
+            session_token=session_token,
         )
         db.add(new_user)
     db.commit()
 
-    return {
-        "message": "Login successful and user saved to database",
-        "spotify_id": spotify_id,
-        "display_name": display_name,
-    }
+    redirect_params = urllib.parse.urlencode({
+        "session_token": session_token,
+        "display_name": display_name or "",
+    })
+    return RedirectResponse(f"/?{redirect_params}")
 
 
 @app.get("/api/fetch-top-tracks")
-def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
-    """Pulls the user's top tracks from Spotify and stores them in the database."""
+def fetch_top_tracks(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Pulls the authenticated user's top tracks from Spotify and stores them in the database."""
 
-    user = db.query(UserModel).filter(UserModel.spotify_id == spotify_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found. Log in first.")
+    spotify_id = user.spotify_id
 
     response = requests.get(
         "https://api.spotify.com/v1/me/top/tracks?limit=50&time_range=long_term",
@@ -165,26 +198,27 @@ def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
     db.commit()
     return {"message": f"Saved {saved_count} top tracks", "spotify_id": spotify_id}
 
+
 @app.post("/api/sync-genres")
-def sync_genres(spotify_id: str, db: Session = Depends(get_db)):
+def sync_genres(user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
     """Backfills genre data (from Spotify's per-artist endpoint) for every
-    artist tied to this user's listening history. Run this after
-    fetch-top-tracks and before requesting recommendations."""
-    try:
-        updated = sync_artist_genres(db, spotify_id)
-    except ValueError:
-        raise HTTPException(status_code=404, detail="User not found. Log in first.")
-    return {"message": f"Updated genres for {updated} artists", "spotify_id": spotify_id}
+    artist tied to the authenticated user's listening history. Run this
+    after fetch-top-tracks and before requesting recommendations."""
+    updated = sync_artist_genres(db, user.spotify_id)
+    return {"message": f"Updated genres for {updated} artists", "spotify_id": user.spotify_id}
 
 
 @app.get("/api/recommendations")
-def get_recommendations(spotify_id: str, limit: int = 20, db: Session = Depends(get_db)):
-    """Content-based track recommendations, scored by genre overlap
-    between this user's recency-weighted listening profile and every
-    track already stored in the database that they haven't heard yet."""
-    user = db.query(UserModel).filter(UserModel.spotify_id == spotify_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found. Log in first.")
+def get_recommendations(limit: int = 20, user: UserModel = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Content-based track recommendations for the authenticated user,
+    scored by genre overlap between their recency-weighted listening
+    profile and every track already stored in the database that they
+    haven't heard yet."""
+    recs = recommend_tracks(db, user.spotify_id, limit=limit)
+    return {"spotify_id": user.spotify_id, "count": len(recs), "recommendations": recs}
 
-    recs = recommend_tracks(db, spotify_id, limit=limit)
-    return {"spotify_id": spotify_id, "count": len(recs), "recommendations": recs}
+
+# Mounted last, deliberately -- Starlette matches routes in the order
+# they're registered, so every /api/* route above still takes priority.
+# This just serves the frontend for everything else, including "/".
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

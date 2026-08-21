@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spotify Listening Intelligence</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0b0d;
+    --card: #161618;
+    --border: #2a2a2e;
+    --text: #f2f2f3;
+    --muted: #9a9aa0;
+    --accent: #1db954;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 2rem 1.25rem 4rem;
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  p.sub { color: var(--muted); margin-top: 0; margin-bottom: 2rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+  }
+  button, a.button {
+    display: inline-block;
+    background: var(--accent);
+    color: #06210f;
+    font-weight: 600;
+    border: none;
+    border-radius: 999px;
+    padding: 0.6rem 1.2rem;
+    cursor: pointer;
+    text-decoration: none;
+    font-size: 0.95rem;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.secondary, a.secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+  .status { color: var(--muted); font-size: 0.9rem; margin-top: 0.75rem; min-height: 1.2em; }
+  ul.tracks { list-style: none; padding: 0; margin: 1rem 0 0; }
+  ul.tracks li {
+    border-top: 1px solid var(--border);
+    padding: 0.75rem 0;
+  }
+  ul.tracks li:first-child { border-top: none; }
+  .track-title { font-weight: 600; }
+  .track-artist { color: var(--muted); font-size: 0.9rem; }
+  .genres { margin-top: 0.35rem; }
+  .genre-pill {
+    display: inline-block;
+    background: rgba(29, 185, 84, 0.15);
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 0.15rem 0.6rem;
+    font-size: 0.75rem;
+    margin: 0.15rem 0.3rem 0 0;
+  }
+  .score { color: var(--muted); font-size: 0.75rem; float: right; }
+  #whoami { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Spotify Listening Intelligence</h1>
+  <p class="sub">A personal genre-taste profile, built from your own listening history.</p>
+
+  <div class="card" id="auth-card">
+    <div id="logged-out">
+      <p>Log in with Spotify to build your profile.</p>
+      <a class="button" href="/api/login">Log in with Spotify</a>
+    </div>
+    <div id="logged-in" style="display:none;">
+      <div class="row" style="justify-content: space-between;">
+        <span id="whoami"></span>
+        <button class="secondary" id="logout-btn">Log out</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="actions-card" style="display:none;">
+    <div class="row">
+      <button id="sync-btn">Sync my listening data</button>
+      <button id="recs-btn" class="secondary">Get recommendations</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card" id="results-card" style="display:none;">
+    <strong>Recommended for you</strong>
+    <ul class="tracks" id="results-list"></ul>
+  </div>
+</main>
+
+<script>
+  const API = "";
+  const els = {
+    loggedOut: document.getElementById("logged-out"),
+    loggedIn: document.getElementById("logged-in"),
+    whoami: document.getElementById("whoami"),
+    actionsCard: document.getElementById("actions-card"),
+    resultsCard: document.getElementById("results-card"),
+    resultsList: document.getElementById("results-list"),
+    status: document.getElementById("status"),
+    syncBtn: document.getElementById("sync-btn"),
+    recsBtn: document.getElementById("recs-btn"),
+    logoutBtn: document.getElementById("logout-btn"),
+  };
+
+  function getToken() { return localStorage.getItem("session_token"); }
+  function setToken(t) { localStorage.setItem("session_token", t); }
+  function clearToken() { localStorage.removeItem("session_token"); localStorage.removeItem("display_name"); }
+
+  function setStatus(msg) { els.status.textContent = msg || ""; }
+
+  function renderAuthState() {
+    const token = getToken();
+    const name = localStorage.getItem("display_name") || "";
+    if (token) {
+      els.loggedOut.style.display = "none";
+      els.loggedIn.style.display = "block";
+      els.actionsCard.style.display = "block";
+      els.whoami.textContent = name ? `Logged in as ${name}` : "Logged in";
+    } else {
+      els.loggedOut.style.display = "block";
+      els.loggedIn.style.display = "none";
+      els.actionsCard.style.display = "none";
+      els.resultsCard.style.display = "none";
+    }
+  }
+
+  // /api/callback redirects here with ?session_token=...&display_name=...
+  // after a successful Spotify login -- pick it up once, then scrub the
+  // URL so the token doesn't sit in browser history.
+  (function captureTokenFromRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("session_token");
+    if (token) {
+      setToken(token);
+      const name = params.get("display_name");
+      if (name) localStorage.setItem("display_name", name);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  })();
+
+  async function authedFetch(path, options = {}) {
+    const token = getToken();
+    const headers = Object.assign({}, options.headers, { Authorization: `Bearer ${token}` });
+    const res = await fetch(API + path, Object.assign({}, options, { headers }));
+    if (res.status === 401) {
+      clearToken();
+      renderAuthState();
+      throw new Error("Session expired -- log in again.");
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.detail || `Request failed (${res.status})`);
+    }
+    return res.json();
+  }
+
+  els.logoutBtn.addEventListener("click", () => {
+    clearToken();
+    renderAuthState();
+  });
+
+  els.syncBtn.addEventListener("click", async () => {
+    els.syncBtn.disabled = true;
+    try {
+      setStatus("Fetching your top tracks from Spotify...");
+      const fetchResult = await authedFetch("/api/fetch-top-tracks");
+      setStatus(fetchResult.message + " -- syncing genres...");
+      const syncResult = await authedFetch("/api/sync-genres", { method: "POST" });
+      setStatus(fetchResult.message + ". " + syncResult.message + ".");
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      els.syncBtn.disabled = false;
+    }
+  });
+
+  els.recsBtn.addEventListener("click", async () => {
+    els.recsBtn.disabled = true;
+    try {
+      setStatus("Scoring recommendations...");
+      const data = await authedFetch("/api/recommendations");
+      setStatus(`${data.count} recommendation(s).`);
+      els.resultsCard.style.display = data.count ? "block" : "none";
+      els.resultsList.innerHTML = "";
+      if (data.count === 0) {
+        setStatus(
+          "No recommendations yet -- this shows up when there's at least one other user's " +
+          "listening data in the database to draw from, since candidates come from tracks " +
+          "you haven't heard that someone using this app has."
+        );
+      }
+      for (const rec of data.recommendations) {
+        const li = document.createElement("li");
+        const genrePills = (rec.matched_genres || [])
+          .map((g) => `<span class="genre-pill">${g}</span>`)
+          .join("");
+        li.innerHTML = `
+          <span class="score">match ${rec.score}</span>
+          <div class="track-title">${rec.title}</div>
+          <div class="track-artist">${rec.artist}</div>
+          <div class="genres">${genrePills}</div>
+        `;
+        els.resultsList.appendChild(li);
+      }
+    } catch (err) {
+      setStatus(err.message);
+    } finally {
+      els.recsBtn.disabled = false;
+    }
+  });
+
+  renderAuthState();
+</script>
+</body>
+</html>
