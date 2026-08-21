@@ -7,6 +7,7 @@ from models import UserModel, TrackModel, ArtistModel, ListeningHistoryModel
 from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import engine, Base, get_db
@@ -15,6 +16,18 @@ from recommendations import sync_artist_genres, recommend_tracks
 
 app = FastAPI(title="Spotify Listening Intelligence Engine API")
 Base.metadata.create_all(bind=engine)
+
+# The Next.js frontend (app/, port 3000 by default) runs on a different
+# origin than this API (port 8000), so browser requests from it are
+# cross-origin and blocked unless explicitly allowed here.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Base.metadata.create_all() only creates missing TABLES, not missing
 # COLUMNS on tables that already exist -- so adding session_token to
@@ -136,7 +149,10 @@ def spotify_callback(code: str = None, error: str = None):
         "session_token": session_token,
         "display_name": display_name or "",
     })
-    return RedirectResponse(f"/?{redirect_params}")
+    # Sends the browser to the Next.js frontend, not back to this API --
+    # the FASTAPI-served static/index.html still works if visited
+    # directly, but the Next.js app is the primary frontend now.
+    return RedirectResponse(f"{FRONTEND_URL}/?{redirect_params}")
 
 
 @app.get("/api/fetch-top-tracks")
