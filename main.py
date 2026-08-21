@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import engine, Base, get_db
 from datetime import datetime, timezone
+from recommendations import sync_artist_genres, recommend_tracks
 
 app = FastAPI(title="Spotify Listening Intelligence Engine API")
 Base.metadata.create_all(bind=engine)
@@ -163,3 +164,27 @@ def fetch_top_tracks(spotify_id: str, db: Session = Depends(get_db)):
 
     db.commit()
     return {"message": f"Saved {saved_count} top tracks", "spotify_id": spotify_id}
+
+@app.post("/api/sync-genres")
+def sync_genres(spotify_id: str, db: Session = Depends(get_db)):
+    """Backfills genre data (from Spotify's per-artist endpoint) for every
+    artist tied to this user's listening history. Run this after
+    fetch-top-tracks and before requesting recommendations."""
+    try:
+        updated = sync_artist_genres(db, spotify_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="User not found. Log in first.")
+    return {"message": f"Updated genres for {updated} artists", "spotify_id": spotify_id}
+
+
+@app.get("/api/recommendations")
+def get_recommendations(spotify_id: str, limit: int = 20, db: Session = Depends(get_db)):
+    """Content-based track recommendations, scored by genre overlap
+    between this user's recency-weighted listening profile and every
+    track already stored in the database that they haven't heard yet."""
+    user = db.query(UserModel).filter(UserModel.spotify_id == spotify_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found. Log in first.")
+
+    recs = recommend_tracks(db, spotify_id, limit=limit)
+    return {"spotify_id": spotify_id, "count": len(recs), "recommendations": recs}
